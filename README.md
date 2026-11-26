@@ -9,7 +9,8 @@ App para el móvil que controla tus gastos del mes y te dice **cada día cuánto
 - **Tu mes va de cobro a cobro**: eliges el día en que cobras (por ejemplo el 27) y "diciembre" va del 27 de noviembre al 26 de diciembre. Si un mes te pagan antes, en los últimos días aparece **¿Ya has cobrado?** para empezar el mes nuevo ese mismo día.
 - **Nómina variable**: al empezar cada mes te pregunta cuánto has cobrado de verdad y recalcula tu ahorro (si es un %) y lo que puedes gastar al día. "Lo normal" se usa hasta que cobras.
 - **Ahorrar más**: botón en la pantalla principal para apuntar lo que apartas por tu cuenta (y meterlo en una hucha si quieres). Lo ves en una lista en Ahorro y puedes quitarlo si te equivocas. Si vas gastando menos de lo previsto, la app te propone ahorrar esa diferencia en el momento.
-- **Huchas**: metas de ahorro (un viaje, un colchón para imprevistos…) con la fecha en la que las completarás a tu ritmo, o lo que necesitas al mes para llegar a tiempo.
+- **Pagas extra**: eliges en qué meses las cobras (por ejemplo junio y diciembre). Ese mes se suman a lo que cobras y la app te propone ahorrar la mitad, toda u otra cantidad. También puedes apuntar extras puntuales (un bonus, la devolución de Hacienda…).
+- **Huchas**: metas de ahorro (un viaje, un colchón para imprevistos…) con la fecha en la que las completarás a tu ritmo, o lo que necesitas al mes para llegar a tiempo. Puedes meter dinero (y decir si sale de lo de este mes) o sacarlo; si lo sacas para gastarlo, se suma a lo que puedes gastar estos días.
 - **Historial**: cuánto ahorraste cada mes y en qué se va el dinero por categorías.
 - Funciona sin conexión, se instala como una app y tiene modo oscuro.
 

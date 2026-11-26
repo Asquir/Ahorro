@@ -175,12 +175,37 @@
     return dkOf(d);
   }
   const isUnexpected = (p, k) => !!p.unexpected && p.from === k;
-  const mainIncome = (k) => S.app.incomes.find((i) => !i.month && applies(i, k));
+  const mainIncome = (k) => S.app.incomes.find((i) => !i.month && i.kind !== 'paga' && applies(i, k));
   const incomeKnown = (i, k) => !!(i.over && i.over[k] != null);
   // Para que las cantidades de ejemplo tengan sentido en cada moneda
   const curFactor = (cur) => (cur === 'COP' || cur === 'CLP' ? 1000 : cur === 'ARS' ? 500 : cur === 'MXN' ? 20 : 1);
 
-  const applies = (it, mk) => (it.month ? it.month === mk : !it.from || it.from <= mk);
+  const applies = (it, mk) => {
+    if (it.kind === 'paga') return (!it.from || it.from <= mk) && pagaIn(it, mk);
+    return it.month ? it.month === mk : !it.from || it.from <= mk;
+  };
+  // Una paga de diciembre se cobra con la nómina de diciembre: cuenta en el mes de la app que incluye ese día de cobro
+  function pagaDate(it, k) {
+    const ms = Array.isArray(it.months) ? it.months : [];
+    for (const cm of [addMonths(k, -1), k, addMonths(k, 1)]) {
+      const m = Number(cm.slice(5));
+      if (!ms.includes(m)) continue;
+      const pd = new Date(Number(cm.slice(0, 4)), m - 1, Math.min(payday(), daysIn(cm)));
+      if (cycleOf(pd) === k) return pd;
+    }
+    return null;
+  }
+  const pagaIn = (it, k) => !!pagaDate(it, k);
+  const isWindfall = (i, k) => i.kind === 'paga' || i.month === k;
+  function nextPaga(it) {
+    const cur = curMk();
+    for (let n = 0; n <= 13; n++) { const k = addMonths(cur, n); if (applies(it, k)) return { k, d: pagaDate(it, k) }; }
+    return null;
+  }
+  const monthsList = (ms) => {
+    const names = (ms || []).slice().sort((a, b) => a - b).map((m) => MONTHS[m - 1]);
+    return names.length > 1 ? names.slice(0, -1).join(', ') + ' y ' + names[names.length - 1] : names[0] || '';
+  };
   const amountIn = (it, mk) => (it.over && it.over[mk] != null ? Number(it.over[mk]) : Number(it.amount) || 0);
   const incomesFor = (mk) => S.app.incomes.filter((i) => applies(i, mk));
   const plannedFor = (mk) => S.app.planned.filter((p) => applies(p, mk));
@@ -545,8 +570,33 @@
 
     const ok = c.level !== 'empty' && c.level !== 'broken';
     // Solo un aviso a la vez, el más útil
-    const prompt = incomeCard(c) || payCard(c) || (ok ? marginCard(c) : '');
+    const prompt = incomeCard(c) || (ok ? windfallCard(c) : '') || payCard(c) || (ok ? marginCard(c) : '');
     return hero + quick + prompt + (ok ? monthCard(c) : '') + paymentsSec(c) + todaySec(c);
+  }
+
+  // Paga extra o ingreso puntual: propone ahorrar una parte en cuanto llega
+  function windfallCard(c) {
+    if (c.when !== 'current' || DEMO) return '';
+    const w = incomesFor(c.mk).find((i) => isWindfall(i, c.mk) && !(i.handled && i.handled[c.mk]));
+    if (!w) return '';
+    const amt = amountIn(w, c.mk);
+    const sv = S.app.saving;
+    const auto = sv.mode === 'percent' ? (amt * (Number(sv.value) || 0)) / 100 : 0;
+    const half = r2(amt / 2 - auto), all = r2(amt - auto);
+    const paga = w.kind === 'paga';
+    return `
+      <section class="callout callout--accent">
+        <p class="callout-title">${paga ? '¡Este mes tienes paga extra!' : `Este mes entra un extra`}</p>
+        <p>${esc(w.name)}: <b>${money(amt)}</b>. ${auto > 0 ? `Ya ahorras el ${sv.value}% (${money(auto)}) sin hacer nada. ` : ''}¿Cuánto quieres ahorrar de ${paga ? 'ella' : 'esto'}?</p>
+        <div class="btn-row">
+          ${half > 0 ? `<button class="btn btn-soft" data-act="wf-save" data-id="${w.id}" data-v="${half}" data-t="${r2(amt / 2)}">La mitad · ${money(amt / 2)}</button>` : ''}
+          <button class="btn btn-good" ${half > 0 ? '' : 'style="grid-column:1 / -1"'} data-act="wf-save" data-id="${w.id}" data-v="${all}" data-t="${amt}">${paga ? 'Toda' : 'Todo'} · ${money(amt)}</button>
+        </div>
+        <div class="links-row">
+          <button class="link" data-act="wf-other" data-id="${w.id}">Otra cantidad</button>
+          <button class="link muted" data-act="wf-skip" data-id="${w.id}">No, gracias</button>
+        </div>
+      </section>`;
   }
 
   // Nómina variable: al empezar el mes, pregunta cuánto has cobrado de verdad
@@ -801,13 +851,10 @@
       <section class="sec">
         <div class="sec-head"><h2>Ingresos</h2><span class="muted num">${money(c.income)}</span></div>
         <div class="card card-tight"><div class="list">
-          ${inc.map((i) => `
-            <button class="row row-btn" data-act="edit-income" data-id="${i.id}">
-              <span class="row-ico" aria-hidden="true">💶</span>
-              <span class="row-main"><span class="row-t">${esc(i.name)}</span><span class="row-s">${i.month ? 'Solo este mes' : incomeKnown(i, mk) && Math.abs(i.over[mk] - i.amount) > 0.004 ? `Este mes · normalmente ${money(i.amount)}` : 'Cada mes'}</span></span>
-              <span class="row-v good">+${money(amountIn(i, mk))}</span>
-            </button>`).join('')}
+          ${inc.map((i) => incomeRow(i, mk, true)).join('')}
+          ${S.app.incomes.filter((i) => i.kind === 'paga' && !applies(i, mk)).map((i) => incomeRow(i, mk, false)).join('')}
           <button class="add-row" data-act="new-income">${I.plus}Añadir ingreso</button>
+          ${S.app.incomes.some((i) => i.kind === 'paga') ? '' : `<button class="add-row" style="margin-top:0" data-act="new-income" data-kind="paga">${I.plus}Añadir paga extra</button>`}
         </div></div>
       </section>
 
@@ -833,6 +880,21 @@
       </section>`;
   }
 
+  function incomeRow(i, mk, active) {
+    let sub;
+    if (i.kind === 'paga') {
+      const nx = active ? null : nextPaga(i);
+      sub = active ? `Paga extra · este mes` : `Paga extra · ${monthsList(i.months)}${nx ? ` · la próxima hacia el ${dShort(nx.d)}` : ''}`;
+    } else if (i.month) sub = 'Solo este mes';
+    else sub = incomeKnown(i, mk) && Math.abs(i.over[mk] - i.amount) > 0.004 ? `Este mes · normalmente ${money(i.amount)}` : 'Cada mes';
+    return `
+      <button class="row row-btn" data-act="edit-income" data-id="${i.id}">
+        <span class="row-ico" aria-hidden="true">${i.kind === 'paga' ? '🎉' : '💶'}</span>
+        <span class="row-main"><span class="row-t">${esc(i.name)}</span><span class="row-s">${sub}</span></span>
+        <span class="row-v ${active ? 'good' : 'faint'}">${active ? '+' : ''}${money(active ? amountIn(i, mk) : i.amount)}</span>
+      </button>`;
+  }
+
   // ─────────── AHORRO ───────────
   function viewAhorro() {
     const mk = curMk();
@@ -852,10 +914,13 @@
         <p class="hero-note">si gastas como mucho lo que te dice cada día</p>
         <div class="save-grid">
           <div><small>Tu meta</small><b>${money(c.saveTarget)}</b></div>
-          <div><small>Extra por tu cuenta</small><b>${money(c.extra)}</b></div>
+          <div><small>${c.extra < 0 ? 'Sacado este mes' : 'Extra por tu cuenta'}</small><b>${c.extra < 0 ? '−' + money(-c.extra) : money(c.extra)}</b></div>
         </div>
         ${c.resisted ? `<p class="hero-note" style="margin-top:12px">Y has dicho que no a ${money(c.resisted)} en caprichos.</p>` : ''}
-        <button class="btn btn-block" data-act="extra">${I.plus}Ahorrar más</button>
+        <div class="btn-row wide-r save-actions">
+          <button class="btn btn-inv" data-act="withdraw">Sacar</button>
+          <button class="btn" data-act="extra">${I.plus}Ahorrar más</button>
+        </div>
       </section>
       ${savesSec(mk)}
 
@@ -888,16 +953,16 @@
     if (!list.length) return '';
     return `
       <section class="sec">
-        <div class="sec-head"><h2>Extra de ${monthName(mk)}</h2><span class="muted num">${money(sum(list, (x) => x.amount))}</span></div>
+        <div class="sec-head"><h2>Movimientos de ${monthName(mk)}</h2></div>
         <div class="card card-tight"><div class="list">
           ${list.map((x) => {
             const g = x.goal && S.app.goals.find((y) => y.id === x.goal);
             return `
             <div class="row" style="grid-template-columns:auto 1fr auto auto">
               <span class="row-ico" aria-hidden="true">${g ? esc(g.emoji || '🐷') : '🐷'}</span>
-              <span class="row-main"><span class="row-t">${g ? `A “${esc(g.name)}”` : 'Ahorrado por tu cuenta'}</span><span class="row-s">${dShort(new Date(x.ts || Date.now()))}</span></span>
-              <span class="row-v good">+${money(x.amount)}</span>
-              <button class="ob-x" data-act="del-save" data-id="${x.id}" aria-label="Quitar ${money(x.amount)}">${I.x}</button>
+              <span class="row-main"><span class="row-t">${x.amount < 0 ? (g ? `Sacado de “${esc(g.name)}”` : 'Sacado de tus ahorros') : g ? `A “${esc(g.name)}”` : x.note ? esc(x.note) : 'Ahorrado por tu cuenta'}</span><span class="row-s">${dShort(new Date(x.ts || Date.now()))}${x.amount < 0 ? ' · para gastar' : ''}</span></span>
+              <span class="row-v ${x.amount < 0 ? 'bad' : 'good'}">${x.amount < 0 ? '−' : '+'}${money(Math.abs(x.amount))}</span>
+              <button class="ob-x" data-act="del-save" data-id="${x.id}" aria-label="Quitar ${money(Math.abs(x.amount))}">${I.x}</button>
             </div>`;
           }).join('')}
         </div></div>
@@ -926,7 +991,10 @@
         </button>
         <div class="goal-track"><span style="width:${pct}%"></span></div>
         <div class="goal-meta"><span>${eta}</span></div>
-        ${left > 0 ? `<div class="goal-actions"><button class="btn btn-soft btn-sm" data-act="deposit" data-id="${g.id}">${I.plus}Añadir dinero</button></div>` : ''}
+        <div class="goal-actions">
+          ${left > 0 ? `<button class="btn btn-soft btn-sm" data-act="deposit" data-id="${g.id}">${I.plus}Añadir</button>` : ''}
+          ${g.saved > 0 ? `<button class="btn btn-soft btn-sm" data-act="withdraw" data-id="${g.id}">Sacar</button>` : ''}
+        </div>
       </div>`;
   }
   const monthsBetween = (a, b) => (Number(b.slice(0, 4)) - Number(a.slice(0, 4))) * 12 + Number(b.slice(5)) - Number(a.slice(5));
@@ -948,7 +1016,7 @@
   function renderSheet(first) {
     const s = $('#sheet-root');
     if (!ui.sheet) { s.innerHTML = ''; return; }
-    const builders = { paynow: sheetPaynow, payday: sheetPayday, expense: sheetExpense, income: sheetIncome, planned: sheetPlanned, saving: sheetSaving, goal: sheetGoal, deposit: sheetDeposit, extra: sheetExtra, settings: sheetSettings, confirm: sheetConfirm };
+    const builders = { withdraw: sheetWithdraw, paynow: sheetPaynow, payday: sheetPayday, expense: sheetExpense, income: sheetIncome, planned: sheetPlanned, saving: sheetSaving, goal: sheetGoal, deposit: sheetDeposit, extra: sheetExtra, settings: sheetSettings, confirm: sheetConfirm };
     const { title, body, sub } = builders[ui.sheet.type]();
     const scroll = $('.sheet', s) ? $('.sheet', s).scrollTop : 0;
     s.innerHTML = `
@@ -1141,31 +1209,55 @@
   }
 
   // ─────────── ingreso ───────────
+  const fv = (v) => { const n = r2(v); return (Number.isInteger(n) ? String(n) : n.toFixed(2)).replace('.', decSep()); };
   function sheetIncome() {
     const sh = ui.sheet;
     const it = sh.id ? S.app.incomes.find((i) => i.id === sh.id) : null;
     const k = curMk();
-    const rec = !it || !it.month;
-    const isMain = it && rec && mainIncome(k) === it;
-    const fv = (v) => { const n = r2(v); return esc((Number.isInteger(n) ? String(n) : n.toFixed(2)).replace('.', decSep())); };
+    if (!sh.kind) sh.kind = it ? (it.kind === 'paga' ? 'paga' : it.month ? 'once' : 'rec') : sh.preset || 'rec';
+    if (sh.nameV == null) sh.nameV = it ? it.name : sh.kind === 'paga' ? 'Paga extra' : 'Nómina';
+    if (sh.amountV == null) sh.amountV = it ? fv(it.amount) : '';
+    if (sh.nowV == null && it) sh.nowV = fv(amountIn(it, k));
+    if (!sh.months) sh.months = it && Array.isArray(it.months) ? it.months.slice() : [6, 12];
+    const kind = sh.kind;
+    const isMain = it && kind === 'rec' && !it.month && it.kind !== 'paga' && mainIncome(k) === it;
+    const amountLabel = kind === 'paga' ? 'Cantidad de cada paga' : kind === 'once' ? `Cantidad (solo en ${monthName(k)})` : 'Cantidad al mes';
     return {
-      title: it ? it.name : 'Nuevo ingreso',
+      title: it ? it.name : kind === 'paga' ? 'Paga extra' : 'Nuevo ingreso',
       body: `
-        <label class="field"><span>Concepto</span><input class="input" id="f-name" value="${esc(it ? it.name : sh.name || 'Nómina')}" maxlength="40" autocomplete="off"></label>
-        ${it && rec ? `
+        <div class="seg" role="group" aria-label="Tipo de ingreso">
+          <button data-act="inc-kind" data-kind="rec" aria-pressed="${kind === 'rec'}">Cada mes</button>
+          <button data-act="inc-kind" data-kind="paga" aria-pressed="${kind === 'paga'}">Paga extra</button>
+          <button data-act="inc-kind" data-kind="once" aria-pressed="${kind === 'once'}">Solo este mes</button>
+        </div>
+        <label class="field"><span>Concepto</span><input class="input" id="f-name" value="${esc(sh.nameV)}" maxlength="40" autocomplete="off"></label>
+        ${it && kind === 'rec' && !it.month && it.kind !== 'paga' ? `
         <div class="grid2">
-          <label class="field"><span>En ${monthName(k)} has cobrado</span><input class="input money-in" id="f-now" inputmode="decimal" value="${fv(amountIn(it, k))}" data-autofocus autocomplete="off"></label>
-          <label class="field"><span>Normalmente</span><input class="input money-in" id="f-amount" inputmode="decimal" value="${fv(it.amount)}" autocomplete="off"></label>
+          <label class="field"><span>En ${monthName(k)} has cobrado</span><input class="input money-in" id="f-now" inputmode="decimal" value="${esc(sh.nowV)}" data-autofocus autocomplete="off"></label>
+          <label class="field"><span>Normalmente</span><input class="input money-in" id="f-amount" inputmode="decimal" value="${esc(sh.amountV)}" autocomplete="off"></label>
         </div>
         <p class="note">Si un mes cobras más o menos, cambia solo “En ${monthName(k)}”.</p>`
-        : `<label class="field"><span>${it ? 'Cantidad' : 'Cantidad al mes'}</span><input class="input money-in" id="f-amount" inputmode="decimal" placeholder="0" value="${it ? fv(it.amount) : ''}" data-autofocus autocomplete="off"></label>`}
-        <div class="toggle-row"><span>Se repite cada mes<small>Si no, solo cuenta en ${monthName(k)}</small></span>
-          <label class="switch"><input type="checkbox" id="f-rec" ${rec ? 'checked' : ''} aria-label="Se repite cada mes"><span></span></label></div>
+        : `<label class="field"><span>${amountLabel}</span><input class="input money-in" id="f-amount" inputmode="decimal" placeholder="0" value="${esc(sh.amountV)}" data-autofocus autocomplete="off"></label>`}
+        ${kind === 'paga' ? `
+        <div class="field"><span class="field-label">¿En qué meses la cobras?</span>
+          <div class="chips wrap month-chips" role="group" aria-label="Meses de la paga extra">
+            ${MONTHS_S.map((m, ix) => `<button class="chip" data-act="inc-month" data-m="${ix + 1}" aria-pressed="${sh.months.includes(ix + 1)}">${cap(m)}</button>`).join('')}
+          </div>
+          <p class="note">Ese mes se suma a lo que cobras y te preguntaré cuánto quieres ahorrar de ella.</p>
+        </div>` : ''}
+        ${kind === 'once' ? `<p class="note">Para un extra puntual: un bonus, la devolución de Hacienda, un regalo… Te preguntaré cuánto quieres ahorrar.</p>` : ''}
         ${isMain ? `<div class="toggle-row"><span>Preguntarme cada mes cuánto he cobrado<small>Para nóminas que cambian de un mes a otro</small></span>
           <label class="switch"><input type="checkbox" id="f-ask" ${!it.fixed ? 'checked' : ''} aria-label="Preguntarme cada mes"><span></span></label></div>` : ''}
         ${it ? `<div class="btn-row wide-r"><button class="btn btn-danger" data-act="del-income">Borrar</button><button class="btn btn-primary" data-act="save-income">Guardar</button></div>`
-          : `<button class="btn btn-primary btn-block" data-act="save-income">Añadir ingreso</button>`}`,
+          : `<button class="btn btn-primary btn-block" data-act="save-income">Añadir</button>`}`,
     };
+  }
+  function syncIncome() {
+    const sh = ui.sheet;
+    if (!sh || sh.type !== 'income') return;
+    const n = $('#f-name'); if (n) sh.nameV = n.value;
+    const a = $('#f-amount'); if (a) sh.amountV = a.value;
+    const w = $('#f-now'); if (w) sh.nowV = w.value;
   }
 
   // ─────────── gasto previsto ───────────
@@ -1252,15 +1344,50 @@
     const g = S.app.goals.find((x) => x.id === sh.id);
     if (!g) return { title: 'Hucha', body: '' };
     const c = calc(curMk());
-    const sugg = [c.saveTarget, 50, 100].filter((v, i, a) => v > 0 && a.indexOf(v) === i);
+    const f = curFactor(S.app.currency);
+    const sugg = [50 * f, 100 * f, c.saveTarget].filter((v, i, a) => v > 0 && a.indexOf(v) === i);
     return {
       title: `${g.emoji || '🐷'} ${g.name}`,
       sub: `Llevas ${money(g.saved)} de ${money(g.target)}.`,
       body: `
-        <label class="field"><span>Cantidad</span><input class="input money-in" id="d-amount" inputmode="decimal" placeholder="0" autocomplete="off" data-autofocus></label>
+        <label class="field"><span>¿Cuánto metes?</span><input class="input money-in" id="d-amount" inputmode="decimal" placeholder="0" autocomplete="off" data-autofocus></label>
         <div class="chips wrap">${sugg.map((v) => `<button class="chip" data-act="d-fill" data-v="${r2(v)}">${money(v)}</button>`).join('')}</div>
-        <div class="btn-row"><button class="btn btn-soft" data-act="withdraw">Sacar</button><button class="btn btn-primary" data-act="deposit-save">Añadir</button></div>`,
+        <div class="toggle-row"><span>Sale de lo de este mes<small>Actívalo si es dinero nuevo: bajará lo que puedes gastar y contará como ahorro extra</small></span>
+          <label class="switch"><input type="checkbox" id="d-month" aria-label="Sale de lo de este mes"><span></span></label></div>
+        <button class="btn btn-primary btn-block" data-act="deposit-save">Meter en la hucha</button>`,
     };
+  }
+
+  // ─────────── sacar dinero ───────────
+  function sheetWithdraw() {
+    const sh = ui.sheet;
+    const goals = S.app.goals.filter((g) => g.saved > 0);
+    if (sh.goal === undefined) sh.goal = '';
+    const g = sh.goal && S.app.goals.find((x) => x.id === sh.goal);
+    const c = calc(curMk());
+    return {
+      title: 'Sacar dinero',
+      sub: 'Para cuando necesites tirar de lo que tienes ahorrado.',
+      body: `
+        <label class="field"><span>¿Cuánto?</span><input class="input money-in" id="w-amount" inputmode="decimal" placeholder="0" value="${esc(sh.wv || '')}" autocomplete="off" data-autofocus></label>
+        ${goals.length ? `<div class="field"><span class="field-label">¿De dónde?</span><div class="chips wrap">
+          <button class="chip" data-act="w-goal" data-id="" aria-pressed="${!g}">De mis ahorros</button>
+          ${goals.map((x) => `<button class="chip" data-act="w-goal" data-id="${x.id}" aria-pressed="${g === x}">${esc(x.emoji || '🐷')} ${esc(x.name)} · ${money(x.saved)}</button>`).join('')}
+        </div></div>` : ''}
+        ${g ? `<div class="toggle-row"><span>Lo voy a gastar este mes<small>Se suma a lo que puedes gastar estos días</small></span>
+          <label class="switch"><input type="checkbox" id="w-spend" ${sh.spend !== false ? 'checked' : ''} aria-label="Lo voy a gastar este mes"><span></span></label></div>` : ''}
+        <div class="preview-line" id="w-preview">${withdrawPreview(parseNum(sh.wv), c, g, sh.spend !== false)}</div>
+        <button class="btn btn-primary btn-block" data-act="w-save">Sacar</button>`,
+    };
+  }
+  function withdrawPreview(x, c, g, spend) {
+    const out = [];
+    if (g) out.push(x > g.saved + 0.004 ? `<span class="bad">En “${esc(g.name)}” solo hay ${money(g.saved)}.</span>` : `En “${esc(g.name)}” quedarán <b>${money(g.saved - (x || 0))}</b>.`);
+    if (!g || spend) {
+      if (x > 0) out.push(`Podrás gastar <b>${money(Math.max(0, c.B - c.spentBefore + x) / Math.max(1, c.daysLeft))}</b> al día (ahora ${money(c.dailyToday)}) y este mes ahorrarás ${money(c.planSaved - x)}.`);
+      else out.push(`Ahora puedes gastar ${money(c.dailyToday)} al día.`);
+    }
+    return out.join(' ');
   }
 
   // ─────────── ahorrar más ───────────
@@ -1273,7 +1400,7 @@
     const f = curFactor(S.app.currency);
     const ahead = c.margin > 1 ? (zeroDec() ? Math.floor(c.margin) : Math.floor(c.margin * 100) / 100) : 0;
     return {
-      title: 'Ahorrar más este mes',
+      title: sh.windfall ? '¿Cuánto ahorras de tu extra?' : 'Ahorrar más este mes',
       sub: 'Apunta lo que apartas por tu cuenta. Deja de contar para gastar y se suma a lo que ahorras.',
       body: `
         <label class="field"><span>¿Cuánto?</span><input class="input money-in" id="x-amount" inputmode="decimal" placeholder="0" value="${amt !== '' ? esc(String(amt).replace('.', decSep())) : ''}" autocomplete="off" data-autofocus></label>
@@ -1295,9 +1422,10 @@
     const nd = Math.max(0, c.B - c.spentBefore - x) / Math.max(1, c.daysLeft);
     return `Ahorrarás <b>${money(c.planSaved + x)}</b> este mes y podrás gastar <b>${money(nd)}</b> al día durante ${dl}.`;
   }
-  function addSave(mk, amount, goalId) {
+  function addSave(mk, amount, goalId, note) {
     const m = Mw(mk);
     const entry = { id: uid(), amount, ts: Date.now(), goal: goalId || null };
+    if (note) entry.note = note;
     m.saves.push(entry);
     m.extra = r2(sum(m.saves, (x) => x.amount));
     const g = goalId && S.app.goals.find((y) => y.id === goalId);
@@ -1416,6 +1544,7 @@
     ui.ob = {
       step: 0, name: '', currency: S.app.currency || 'EUR',
       incomes: [{ id: uid(), name: 'Nómina', amount: '' }],
+      pagas: [],
       payday: 1,
       planned: [],
       saving: { mode: 'percent', value: 20 },
@@ -1489,6 +1618,8 @@
       <div class="ob-rows">${obRows(o.incomes, 'incomes', false)}</div>
       <button class="link" style="align-self:flex-start" data-act="ob-add" data-kind="incomes">+ Otro ingreso</button>
       <div class="ob-total"><span>Total al mes</span><b id="ob-total">${money(obCalc().income)}</b></div>
+      ${o.pagas.length ? `<div class="field"><span class="field-label">Pagas extra (junio y diciembre; lo puedes cambiar luego en Plan)</span><div class="ob-rows">${obRows(o.pagas, 'pagas', false)}</div></div>`
+        : `<button class="link" style="align-self:flex-start" data-act="ob-add" data-kind="pagas">+ Tengo pagas extra (verano e invierno)</button>`}
       <div class="field"><span class="field-label">¿Qué día cobras normalmente?</span>
         <div class="chips wrap" role="group" aria-label="Día de cobro">
           ${PAYDAYS.map((d) => `<button class="chip" data-act="ob-pay" data-v="${d}" aria-pressed="${o.payday === d}">${d === 1 ? 'Día 1 (mes natural)' : `Día ${d}`}</button>`).join('')}
@@ -1560,7 +1691,8 @@
     const mk = curMk();
     S.app = normalizeApp({
       onboarded: true, name: o.name.trim(), currency: o.currency, start: mk, startDate: todayDk(), payday: o.payday,
-      incomes: o.incomes.filter((i) => parseNum(i.amount) > 0).map((i) => ({ id: uid(), name: i.name.trim() || 'Ingreso', amount: r2(parseNum(i.amount)), month: null, from: mk })),
+      incomes: o.incomes.filter((i) => parseNum(i.amount) > 0).map((i) => ({ id: uid(), name: i.name.trim() || 'Ingreso', amount: r2(parseNum(i.amount)), month: null, from: mk }))
+        .concat((o.pagas || []).filter((i) => parseNum(i.amount) > 0).map((i) => ({ id: uid(), name: i.name.trim() || 'Paga extra', amount: r2(parseNum(i.amount)), month: null, from: mk, kind: 'paga', months: [6, 12] }))),
       planned: o.planned.filter((p) => parseNum(p.amount) > 0).map((p) => ({ id: uid(), name: p.name.trim() || 'Gasto', amount: r2(parseNum(p.amount)), cat: p.cat || 'otros', day: null, month: null, from: mk, paid: {} })),
       saving: o.saving.mode === 'percent' ? { mode: 'percent', value: o.saving.value } : { mode: 'amount', value: r2(parseNum(o.saving.value)) },
       goals: [], lastCat: 'super',
@@ -1586,7 +1718,7 @@
     const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
     const a = normalizeApp({
       onboarded: true, name: 'Alex', currency: cur, start: addMonths(mk, -4), startDate: addMonths(mk, -4) + '-01', payday: 1,
-      incomes: [{ id: 'i1', name: 'Nómina', amount: 1850 * k, month: null, over: { [mk]: 1920 * k } }],
+      incomes: [{ id: 'i1', name: 'Nómina', amount: 1850 * k, month: null, over: { [mk]: 1920 * k } }, { id: 'i2', name: 'Paga extra', amount: 1600 * k, month: null, kind: 'paga', months: [6, 12], handled: { [mk]: true } }],
       planned: [
         ['Alquiler', 650, 1, 'hogar'], ['Abono transporte', 40, 1, 'transporte'], ['Gimnasio', 34.9, 5, 'salud'], ['Luz', 58, 8, 'facturas'],
         ['Internet y móvil', 45, 12, 'facturas'], ['Suscripciones', 17.98, 15, 'subs'], ['Seguro del coche', 38, 20, 'otros'],
@@ -1728,29 +1860,106 @@
       if (p.paid[mk]) delete p.paid[mk]; else p.paid[mk] = true;
       Store.saveApp(); render();
     },
-    'new-income'() { openSheet({ type: 'income' }); },
+    'new-income'(el) { openSheet({ type: 'income', preset: el.dataset.kind || null }); },
+    'inc-kind'(el) {
+      syncIncome();
+      const sh = ui.sheet;
+      const k = el.dataset.kind;
+      if (k === sh.kind) return;
+      if (k === 'paga' && (!sh.nameV || sh.nameV === 'Nómina' || sh.nameV === 'Extra')) sh.nameV = 'Paga extra';
+      if (k !== 'paga' && sh.nameV === 'Paga extra') sh.nameV = k === 'rec' ? 'Nómina' : 'Extra';
+      sh.kind = k;
+      renderSheet();
+    },
+    'inc-month'(el) {
+      const sh = ui.sheet;
+      const m = Number(el.dataset.m);
+      sh.months = sh.months.includes(m) ? sh.months.filter((x) => x !== m) : sh.months.concat(m);
+      el.setAttribute('aria-pressed', sh.months.includes(m));
+    },
+    'wf-save'(el) {
+      const k = curMk();
+      const w = S.app.incomes.find((i) => i.id === el.dataset.id);
+      if (!w) return;
+      const v = r2(Number(el.dataset.v));
+      w.handled = Object.assign({}, w.handled, { [k]: true });
+      const entry = v > 0 ? addSave(k, v, null, `De ${w.name}`) : null;
+      Store.saveApp(); render();
+      toast(`¡Hecho! De ${w.name} ahorras ${money(Number(el.dataset.t))}`, () => { if (entry) removeSave(k, entry.id); delete w.handled[k]; Store.saveApp(); render(); });
+    },
+    'wf-other'(el) { openSheet({ type: 'extra', windfall: el.dataset.id }); },
+    'wf-skip'(el) {
+      const k = curMk();
+      const w = S.app.incomes.find((i) => i.id === el.dataset.id);
+      if (!w) return;
+      w.handled = Object.assign({}, w.handled, { [k]: true });
+      Store.saveApp(); render();
+      toast('Vale, todo para gastar este mes', () => { delete w.handled[k]; Store.saveApp(); render(); });
+    },
+    withdraw(el) { openSheet({ type: 'withdraw', goal: el.dataset.id || undefined }); },
+    'w-goal'(el) { const sh = ui.sheet; const a = $('#w-amount'); if (a) sh.wv = a.value; const sp = $('#w-spend'); if (sp) sh.spend = sp.checked; sh.goal = el.dataset.id; renderSheet(); },
+    'w-save'() {
+      const sh = ui.sheet;
+      const x = r2(parseNum($('#w-amount').value));
+      if (!(x > 0)) { $('#w-amount').focus(); toast('Escribe una cantidad'); return; }
+      const g = sh.goal && S.app.goals.find((y) => y.id === sh.goal);
+      if (g && x > g.saved + 0.004) { toast(`En “${g.name}” solo hay ${money(g.saved)}`); return; }
+      const spend = g ? $('#w-spend').checked : true;
+      const k = curMk();
+      let entry = null;
+      if (spend) entry = addSave(k, -x, g ? g.id : null);
+      else { g.saved = r2(Math.max(0, g.saved - x)); Store.saveApp(); }
+      closeSheet(); render();
+      const c = calc(k);
+      toast(spend ? `Sacados ${money(x)}. Hoy puedes gastar ${money(Math.max(0, c.leftToday))}` : `Sacados ${money(x)} de “${g.name}”`, () => {
+        if (entry) removeSave(k, entry.id); else { g.saved = r2(g.saved + x); Store.saveApp(); }
+        render();
+      });
+    },
     'edit-income'(el) { openSheet({ type: 'income', id: el.dataset.id }); },
     'save-income'() {
-      const name = $('#f-name').value.trim() || 'Ingreso';
-      const amount = r2(parseNum($('#f-amount').value));
+      syncIncome();
+      const sh = ui.sheet;
+      const kind = sh.kind;
+      const name = (sh.nameV || '').trim() || (kind === 'paga' ? 'Paga extra' : 'Ingreso');
+      const amount = r2(parseNum(sh.amountV));
       if (!(amount > 0)) { $('#f-amount').focus(); toast('Escribe una cantidad'); return; }
-      const rec = $('#f-rec').checked;
+      if (kind === 'paga' && !sh.months.length) { toast('Elige al menos un mes'); return; }
       const mk = curMk();
-      const id = ui.sheet.id;
-      const nowEl = $('#f-now'), askEl = $('#f-ask');
+      const id = sh.id;
+      const askEl = $('#f-ask');
+      const months = sh.months.slice().sort((a, b) => a - b);
       if (id) {
         const it = S.app.incomes.find((i) => i.id === id);
         const before = amountIn(it, mk);
         const had = incomeKnown(it, mk);
-        Object.assign(it, { name, amount, month: rec ? null : mk });
-        if (rec && !it.from) it.from = mk;
-        if (nowEl && rec) {
-          const now = r2(parseNum(nowEl.value));
-          if (now > 0 && (had || Math.abs(now - before) > 0.004)) { it.over = it.over || {}; it.over[mk] = now; }
+        const wasRec = !it.month && it.kind !== 'paga';
+        it.name = name; it.amount = amount;
+        if (kind === 'rec') {
+          it.month = null; delete it.kind; delete it.months;
+          if (!it.from) it.from = mk;
+          if (wasRec && sh.nowV != null) {
+            const now = r2(parseNum(sh.nowV));
+            if (now > 0 && (had || Math.abs(now - before) > 0.004)) { it.over = it.over || {}; it.over[mk] = now; }
+          }
+          if (askEl) it.fixed = !askEl.checked;
+        } else if (kind === 'paga') {
+          it.month = null; it.kind = 'paga'; it.months = months;
+          if (!it.from) it.from = mk;
+          if (it.over) delete it.over[mk];
+        } else {
+          it.month = mk; delete it.kind; delete it.months;
         }
-        if (askEl) it.fixed = !askEl.checked;
-      } else S.app.incomes.push({ id: uid(), name, amount, month: rec ? null : mk, from: mk });
-      Store.saveApp(); closeSheet(); render(); toast(id ? 'Ingreso actualizado' : 'Ingreso añadido');
+      } else {
+        const it = { id: uid(), name, amount, month: kind === 'once' ? mk : null, from: mk };
+        if (kind === 'paga') { it.kind = 'paga'; it.months = months; }
+        S.app.incomes.push(it);
+      }
+      Store.saveApp(); closeSheet(); render();
+      const it = id ? S.app.incomes.find((i) => i.id === id) : S.app.incomes[S.app.incomes.length - 1];
+      const nx = kind === 'paga' ? nextPaga(it) : null;
+      toast(kind === 'paga' ? (nx && nx.k === mk ? 'Paga extra guardada: en Hoy decides cuánto ahorrar' : `Paga extra guardada${nx ? `: la próxima hacia el ${dShort(nx.d)}` : ''}`)
+        : kind === 'once' ? 'Extra guardado: en Hoy decides cuánto ahorrar' : id ? 'Ingreso actualizado' : 'Ingreso añadido');
     },
     'del-income'() {
       const id = ui.sheet.id;
@@ -1823,8 +2032,17 @@
     },
     deposit(el) { openSheet({ type: 'deposit', id: el.dataset.id }); },
     'd-fill'(el) { const i = $('#d-amount'); i.value = String(el.dataset.v).replace('.', decSep()); },
-    'deposit-save'() { moveGoal(1); },
-    withdraw() { moveGoal(-1); },
+    'deposit-save'() {
+      const fromMonth = $('#d-month') && $('#d-month').checked;
+      if (!fromMonth) { moveGoal(1); return; }
+      const g = S.app.goals.find((x) => x.id === ui.sheet.id);
+      const v = r2(parseNum($('#d-amount').value));
+      if (!g || !(v > 0)) { $('#d-amount').focus(); return; }
+      const k = curMk();
+      const entry = addSave(k, v, g.id);
+      closeSheet(); render();
+      toast(g.saved >= g.target ? `¡Hucha completa! ${g.name}` : `+${money(v)} en ${g.name}`, () => { removeSave(k, entry.id); render(); });
+    },
     extra(el) { openSheet({ type: 'extra', amount: el.dataset.amount ? Number(el.dataset.amount) : null }); },
     'x-goal'(el) { ui.sheet.goal = el.dataset.id; $$('.chip[data-act="x-goal"]').forEach((c) => c.setAttribute('aria-pressed', c.dataset.id === ui.sheet.goal)); },
     'x-fill'(el) { const i = $('#x-amount'); i.value = String(el.dataset.v).replace('.', decSep()); $('#x-preview').innerHTML = extraPreview(parseNum(i.value), calc(curMk())); },
@@ -1833,7 +2051,9 @@
       if (!(x > 0)) { $('#x-amount').focus(); toast('Escribe una cantidad'); return; }
       const mk = curMk();
       const g = ui.sheet.goal && S.app.goals.find((y) => y.id === ui.sheet.goal);
-      const entry = addSave(mk, x, g ? g.id : null);
+      const w = ui.sheet.windfall && S.app.incomes.find((i) => i.id === ui.sheet.windfall);
+      const entry = addSave(mk, x, g ? g.id : null, w ? `De ${w.name}` : null);
+      if (w) { w.handled = Object.assign({}, w.handled, { [mk]: true }); Store.saveApp(); }
       closeSheet(); render();
       toast(g ? `${money(x)} ahorrados en “${g.name}”` : `${money(x)} ahorrados. ¡Bien hecho!`, () => { removeSave(mk, entry.id); render(); });
     },
@@ -1894,7 +2114,7 @@
     'ob-add'(el) {
       const k = el.dataset.kind;
       ui.ob[k].forEach((r) => delete r.focus);
-      ui.ob[k].push({ id: uid(), name: '', amount: '', cat: 'otros', focus: true });
+      ui.ob[k].push({ id: uid(), name: k === 'pagas' ? 'Paga extra' : '', amount: '', cat: 'otros', focus: true });
       render();
       const rows = $$('.ob-row'); const last = rows[rows.length - 1]; last && $('input', last).focus();
     },
@@ -2018,11 +2238,13 @@
       $('#sv-preview').innerHTML = savingPreview(target, free, free / c.days, c);
       return;
     }
+    if (t.id === 'w-amount') { const sh = ui.sheet; sh.wv = t.value; const g = sh.goal && S.app.goals.find((y) => y.id === sh.goal); $('#w-preview').innerHTML = withdrawPreview(parseNum(t.value), calc(curMk()), g, !$('#w-spend') || $('#w-spend').checked); return; }
     if (t.id === 'x-amount') { $('#x-preview').innerHTML = extraPreview(parseNum(t.value), calc(curMk())); return; }
     if (t.id === 'exp-date' && ui.sheet) { ui.sheet.date = t.value || todayDk(); const v = $('#verdict'); if (v) v.outerHTML = verdictHTML(ui.sheet.mode === 'check'); }
   });
   document.addEventListener('change', (e) => {
     if (e.target.id === 'import-file' && e.target.files && e.target.files[0]) importData(e.target.files[0]);
+    if (e.target.id === 'w-spend' && ui.sheet) { const sh = ui.sheet; sh.spend = e.target.checked; const g = sh.goal && S.app.goals.find((y) => y.id === sh.goal); $('#w-preview').innerHTML = withdrawPreview(parseNum($('#w-amount').value), calc(curMk()), g, sh.spend); }
     if (e.target.id === 'exp-rec' && ui.sheet) { ui.sheet.rec = e.target.checked; const v = $('#verdict'); if (v) v.outerHTML = verdictHTML(false); }
   });
   document.addEventListener('keydown', (e) => {
