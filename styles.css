@@ -181,8 +181,8 @@ svg { display: block; }
   flex-direction: column;
   gap: 18px;
   padding-block: 6px calc(var(--tabbar-h) + 44px + env(safe-area-inset-bottom, 0px));
-  animation: rise 0.28s ease both;
 }
+.view.enter, .ob.enter { animation: rise 0.28s ease both; }
 @keyframes rise { from { opacity: 0.4; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 .demo-bar {
@@ -726,7 +726,6 @@ input[type="date"].input, input[type="month"].input { appearance: none; -webkit-
   display: flex; flex-direction: column; gap: 22px;
   padding-block: 22px calc(24px + env(safe-area-inset-bottom, 0px));
   min-height: 100%;
-  animation: rise 0.3s ease both;
 }
 .brand { font-family: var(--font-display); font-weight: 800; font-size: 20px; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }
 .brand svg { width: 30px; height: 30px; }
@@ -766,3 +765,21 @@ input[type="date"].input, input[type="month"].input { appearance: none; -webkit-
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
 .toast.toast--top { bottom: auto; top: calc(env(safe-area-inset-top, 0px) + 12px); }
+
+/* ---------- mes de cobro a cobro ---------- */
+.cycle-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; text-align: left;
+  padding-bottom: 14px; margin-bottom: 14px;
+  border-bottom: 1.5px dashed var(--line);
+}
+.cycle-row > span { display: flex; flex-direction: column; min-width: 0; }
+.cycle-k { font-size: 12px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.cycle-row b { font-family: var(--font-display); font-size: 18px; font-variant-numeric: tabular-nums; }
+.cycle-r { align-items: flex-end; text-align: right; font-size: 13px; font-weight: 600; color: var(--muted); }
+.cycle-r .link { padding: 0; }
+.month-title { text-align: center; min-width: 0; }
+.month-title .muted { font-size: 13px; font-weight: 700; }
+.chip-input { width: 84px; height: 38px; border-radius: 999px; padding: 0 14px; font-size: 14px; font-weight: 700; text-align: center; }
+.ask--pay .ask-ico { background: var(--good-soft); font-size: 20px; }
+.ask--pay .ask-go { color: var(--good); }

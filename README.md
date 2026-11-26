@@ -5,6 +5,8 @@ App para el móvil que controla tus gastos del mes y te dice **cada día cuánto
 - **Hoy puedes gastar X €**: la cifra grande de la pantalla principal, en verde (vas bien), ámbar (con cuidado) o rojo (te has pasado).
 - **¿Me lo puedo permitir?**: escribes un precio y te responde al momento: *Sí, puedes*, *Sí, pero ajusta*, *Mejor no* o *No te llega*, con lo que te quedaría al día después.
 - **Plan del mes**: ingresos, gastos previstos (alquiler, facturas, suscripciones…) que puedes marcar como pagados, y tu meta de ahorro (en % o cantidad fija).
+- **Imprevistos**: un cargo que no esperabas (una suscripción, una factura, una multa) se apunta aparte. No se come lo de un solo día: se reparte entre los días que quedan. Si se va a repetir, pasa a tus gastos fijos.
+- **Tu mes va de cobro a cobro**: eliges el día en que cobras (por ejemplo el 27) y "diciembre" va del 27 de noviembre al 26 de diciembre. Si un mes te pagan antes, en los últimos días aparece **¿Ya has cobrado?** para empezar el mes nuevo ese mismo día.
 - **Apartar ya**: si gastas menos de lo previsto, la app te avisa de que vas por delante y te deja mover ese dinero al ahorro en el momento.
 - **Huchas**: metas de ahorro (un viaje, un colchón para imprevistos…) con la fecha en la que las completarás a tu ritmo, o lo que necesitas al mes para llegar a tiempo.
 - **Historial**: cuánto ahorraste cada mes y en qué se va el dinero por categorías.
@@ -19,6 +21,8 @@ Plan diario       = Para el día a día ÷ días del mes
 Hoy puedes gastar = (Para el día a día − lo gastado antes de hoy) ÷ días que quedan (con hoy)
                     − lo gastado hoy
 ```
+
+"El mes" es el periodo entre un cobro y el siguiente (del 1 al último día si eliges cobrar el día 1). Los imprevistos cuentan como gastos de ese mes, así que bajan un poco el límite de todos los días que quedan.
 
 Si un día gastas menos, el límite de los días siguientes sube un poco; si te pasas, baja. El ahorro se aparta primero, así que ahorras desde el día 1 en vez de esperar a ver qué sobra.
 

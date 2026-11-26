@@ -20,8 +20,10 @@
   const r2 = (n) => Math.round(n * 100) / 100;
   const clone = (o) => JSON.parse(JSON.stringify(o));
   const today = () => new Date();
-  const curMk = () => mkOf(today());
+  const curMk = () => cycleOf(today()); // clave del "mes" actual (de cobro a cobro)
   const todayDk = () => dkOf(today());
+  const dayDiff = (a, b) => Math.round((new Date(b.getFullYear(), b.getMonth(), b.getDate()) - new Date(a.getFullYear(), a.getMonth(), a.getDate())) / 864e5);
+  const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
 
   const MONTHS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
   const MONTHS_S = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
@@ -29,6 +31,7 @@
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
   const monthName = (mk) => MONTHS[Number(mk.slice(5)) - 1];
   const monthLabel = (mk) => cap(monthName(mk)) + ' ' + mk.slice(0, 4);
+  const dShort = (d) => `${d.getDate()} ${MONTHS_S[d.getMonth()]}`;
 
   // Acepta "12,5", "12.50", "1.234,56", "1,234.56", "1.500"
   function parseNum(v) {
@@ -103,7 +106,7 @@
 
   // ───────────────────────── estado ─────────────────────────
   const blankApp = () => ({
-    v: 1, onboarded: false, name: '', currency: 'EUR', start: null,
+    v: 1, onboarded: false, name: '', currency: 'EUR', start: null, startDate: null, payday: 1, cycleStarts: {},
     incomes: [], planned: [], saving: { mode: 'percent', value: 20 }, goals: [], lastCat: 'super', updatedAt: 0,
   });
   const blankMonth = () => ({ expenses: [], extra: 0, resisted: [], summary: null, updatedAt: 0 });
@@ -115,6 +118,9 @@
     if (!b.saving || typeof b.saving !== 'object') b.saving = { mode: 'percent', value: 20 };
     if (!CURRENCIES.some((c) => c.c === b.currency)) b.currency = 'EUR';
     b.planned.forEach((p) => { if (!p.paid || typeof p.paid !== 'object') p.paid = {}; });
+    b.payday = clamp(parseInt(b.payday, 10) || 1, 1, 31);
+    if (!b.cycleStarts || typeof b.cycleStarts !== 'object') b.cycleStarts = {};
+    if (!b.startDate && b.start) b.startDate = b.start + '-' + pad(b.startDay || 1);
     return b;
   }
   function normalizeMonth(m) {
@@ -132,6 +138,42 @@
 
   const M = (mk) => S.months[mk] || EMPTY_MONTH;
   const Mw = (mk) => (S.months[mk] = S.months[mk] || blankMonth());
+
+  // ── Tu "mes" va de cobro a cobro ──
+  // Con día de cobro 27, "diciembre" va del 27 de noviembre al 26 de diciembre.
+  // Si un mes cobras antes, cycleStarts guarda el día real en que empezó ese mes.
+  const payday = () => clamp(parseInt(S.app.payday, 10) || 1, 1, 31);
+  function cycleStart(k) {
+    const ov = S.app.cycleStarts && S.app.cycleStarts[k];
+    if (ov && /^\d{4}-\d{2}-\d{2}$/.test(ov)) return parseDk(ov);
+    const P = payday();
+    const base = P >= 16 ? addMonths(k, -1) : k;
+    const [y, m] = base.split('-').map(Number);
+    return new Date(y, m - 1, Math.min(P, daysIn(base)));
+  }
+  const cycleEnd = (k) => addDays(cycleStart(addMonths(k, 1)), -1);
+  function cycleOf(date) {
+    const dk = dkOf(date);
+    let k = mkOf(date);
+    if (payday() >= 16 && date.getDate() >= Math.min(payday(), daysIn(k))) k = addMonths(k, 1);
+    for (let i = 0; i < 4; i++) {
+      if (dk < dkOf(cycleStart(k))) k = addMonths(k, -1);
+      else if (dk > dkOf(cycleEnd(k))) k = addMonths(k, 1);
+      else return k;
+    }
+    return k;
+  }
+  const cycleRange = (k) => `${dShort(cycleStart(k))} – ${dShort(cycleEnd(k))}`;
+  const startCycle = () => (S.app.startDate ? cycleOf(parseDk(S.app.startDate)) : S.app.start);
+  // Fecha de un pago con "día del mes" dentro del ciclo k
+  function dueDk(p, k) {
+    if (!p.day) return null;
+    const st = cycleStart(k), en = cycleEnd(k);
+    let d = new Date(st.getFullYear(), st.getMonth(), Math.min(p.day, daysIn(mkOf(st))));
+    if (d < st) d = new Date(en.getFullYear(), en.getMonth(), Math.min(p.day, daysIn(mkOf(en))));
+    return dkOf(d);
+  }
+  const isUnexpected = (p, k) => !!p.unexpected && p.from === k;
 
   const applies = (it, mk) => (it.month ? it.month === mk : !it.from || it.from <= mk);
   const amountIn = (it, mk) => (it.over && it.over[mk] != null ? Number(it.over[mk]) : Number(it.amount) || 0);
@@ -174,32 +216,44 @@
   const zeroDec = () => curInfo().d === 0;
 
   // ───────────────────────── cálculos del mes ─────────────────────────
+  // Los gastos se guardan por mes natural (según su fecha) y se reúnen aquí por ciclo.
+  function expensesIn(start, end) {
+    const sdk = dkOf(start), edk = dkOf(end), out = [];
+    for (let mk = mkOf(start); mk <= mkOf(end); mk = addMonths(mk, 1)) {
+      for (const e of M(mk).expenses) if (e.date >= sdk && e.date <= edk) out.push(e);
+    }
+    return out;
+  }
   function calc(mk, now = today()) {
     const a = S.app;
     const m = M(mk);
-    const days = daysIn(mk);
-    const cmk = mkOf(now);
+    const start = cycleStart(mk), end = cycleEnd(mk);
+    const days = Math.max(1, dayDiff(start, end) + 1);
+    const cmk = cycleOf(now);
     const when = mk === cmk ? 'current' : mk < cmk ? 'past' : 'future';
     const sm = m.summary;
     const income = sm ? sm.income : sum(incomesFor(mk), (i) => amountIn(i, mk));
     const pl = plannedFor(mk);
     const planned = sm ? sm.planned : sum(pl, (p) => amountIn(p, mk));
+    const unexpected = sum(pl.filter((p) => isUnexpected(p, mk)), (p) => amountIn(p, mk));
     const paid = sum(pl.filter((p) => p.paid && p.paid[mk]), (p) => amountIn(p, mk));
     const saveTarget = sm ? sm.saveTarget : a.saving.mode === 'percent' ? (income * (Number(a.saving.value) || 0)) / 100 : Number(a.saving.value) || 0;
     const extra = Number(m.extra) || 0;
     const baseB = income - planned - saveTarget; // dinero libre para el día a día según el plan
     // El mes en que empiezas a usar la app cuenta desde ese día: los días anteriores se dan por gastados según el plan.
-    const effStart = !sm && a.start === mk && a.startDay > 1 ? Math.min(a.startDay, days) : 1;
+    const sd = a.startDate ? parseDk(a.startDate) : null;
+    const effStart = !sm && sd && cycleOf(sd) === mk ? clamp(dayDiff(start, sd) + 1, 1, days) : 1;
     const prior = (baseB / days) * (effStart - 1);
     const B = baseB - extra - prior; // tras apartar ahorro extra
-    const dayNum = when === 'current' ? now.getDate() : when === 'past' ? days + 1 : 1;
+    const dayNum = when === 'current' ? dayDiff(start, now) + 1 : when === 'past' ? days + 1 : 1;
     const tdk = when === 'current' ? dkOf(now) : null;
 
+    const expenses = expensesIn(start, end);
     let spent = 0, spentToday = 0, spentBefore = 0;
     const byDay = new Array(days).fill(0);
     const byCat = {};
-    for (const e of m.expenses) {
-      const d = Number(e.date.slice(8, 10));
+    for (const e of expenses) {
+      const d = dayDiff(start, parseDk(e.date)) + 1;
       const v = Number(e.amount) || 0;
       spent += v;
       if (d >= 1 && d <= days) byDay[d - 1] += v;
@@ -231,8 +285,8 @@
     else if (leftToday < dailyToday * 0.25) level = 'tight';
 
     return {
-      mk, when, days, dayNum, effStart, prior, income, planned, paid, plannedItems: pl, saveTarget, extra, baseB, B,
-      spent, spentToday, spentBefore, byDay, byCat, daysLeft, planDaily, dailyToday, leftToday, leftMonth,
+      mk, when, start, end, days, dayNum, effStart, prior, income, planned, unexpected, paid, plannedItems: pl, saveTarget, extra, baseB, B,
+      expenses, spent, spentToday, spentBefore, byDay, byCat, daysLeft, planDaily, dailyToday, leftToday, leftMonth,
       tomorrowDaily, margin, elapsed, pace, projectedSaved, planSaved, actualSaved, resisted,
       resistedN: (m.resisted || []).length, level,
     };
@@ -260,18 +314,34 @@
     return { lvl: 'bad', h: 'No te llega', t: `Te comerías <b>${money(-leftAfter)}</b> de tu ahorro de este mes.` };
   }
 
+  // Un imprevisto no se come solo lo de hoy: baja el dinero libre del mes y se reparte entre los días que quedan.
+  function verdictUnexpected(x, c, rec) {
+    if (!(x > 0)) return null;
+    if (c.level === 'empty' || c.level === 'broken') return { lvl: 'neutral', h: 'Primero, tu plan', t: 'Añade tus ingresos para saber cómo te afecta.' };
+    const after = c.leftMonth - x;
+    if (after < 0) return { lvl: 'bad', h: 'Te deja en rojo', t: `No cabe en lo que te queda: <b>${money(-after)}</b> saldrían de tu ahorro de este mes.` };
+    const nd = Math.max(0, c.B - x - c.spentBefore) / Math.max(1, c.daysLeft);
+    const ratio = c.planDaily > 0 ? nd / c.planDaily : 0;
+    const lvl = ratio >= 0.75 ? 'good' : ratio >= 0.5 ? 'warn' : 'bad';
+    const h = lvl === 'good' ? 'Lo puedes asumir' : lvl === 'warn' ? 'Te aprieta un poco' : 'Te deja muy justo';
+    let t = `Se reparte entre ${c.daysLeft === 1 ? 'hoy' : `los ${c.daysLeft} días que quedan`}: tu límite diario pasa de ${money(c.dailyToday)} a <b>${money(nd)}</b>.`;
+    if (rec) t += ` Desde ${monthName(addMonths(c.mk, 1))}, tu plan será de <b>${money((c.baseB - x) / c.days)}</b> al día.`;
+    return { lvl, h, t };
+  }
+
   // Al empezar un mes nuevo, congela los números de los meses anteriores
   function ensureSummaries() {
     const cm = curMk();
+    const sc = startCycle();
+    if (!sc) return false;
     let changed = false;
-    for (const mk of Object.keys(S.months)) {
-      const m = S.months[mk];
-      if (mk < cm && !m.summary) {
-        const c = calc(mk);
-        m.summary = { income: r2(c.income), planned: r2(c.planned), saveTarget: r2(c.saveTarget), spent: r2(c.spent), saved: r2(c.actualSaved) };
-        Store.saveMonth(mk);
-        changed = true;
-      }
+    for (let k = sc, n = 0; k < cm && n < 240; k = addMonths(k, 1), n++) {
+      if (S.months[k] && S.months[k].summary) continue;
+      const c = calc(k);
+      if (!c.expenses.length && !S.months[k]) continue;
+      Mw(k).summary = { income: r2(c.income), planned: r2(c.planned), saveTarget: r2(c.saveTarget), spent: r2(c.spent), saved: r2(c.actualSaved) };
+      Store.saveMonth(k);
+      changed = true;
     }
     return changed;
   }
@@ -401,6 +471,8 @@
     const titles = { hoy: S.app.name ? `Hola, ${esc(S.app.name)}` : 'Hoy', gastos: 'Tus gastos', plan: 'Plan del mes', ahorro: 'Tu ahorro' };
     const views = { hoy: viewHoy, gastos: viewGastos, plan: viewPlan, ahorro: viewAhorro };
     const tab = TABS.some((t) => t.id === ui.tab) ? ui.tab : 'hoy';
+    const anim = ui.animKey !== 'tab:' + tab + (DEMO ? ':demo' : '');
+    ui.animKey = 'tab:' + tab + (DEMO ? ':demo' : '');
     root.innerHTML = `
       <header class="top">
         <div class="top-l">
@@ -410,7 +482,7 @@
         <button class="icon-btn" data-act="settings" aria-label="Ajustes">${I.sliders}</button>
       </header>
       ${DEMO ? `<div class="demo-bar"><span>Estás viendo un ejemplo con datos inventados</span><button data-act="demo-exit">Usar mis datos</button></div>` : ''}
-      <main class="view" id="view">${views[tab]()}</main>
+      <main class="view ${anim ? 'enter' : ''}" id="view">${views[tab]()}</main>
       <nav class="tabbar" aria-label="Secciones">
         <div class="tabbar-in">
           ${tabBtn(TABS[0], tab)}${tabBtn(TABS[1], tab)}
@@ -419,7 +491,11 @@
         </div>
       </nav>`;
   }
-  const daysLeftTxt = (now) => { const n = daysIn(mkOf(now)) - now.getDate(); return n === 0 ? 'último día del mes' : n === 1 ? 'queda 1 día' : `quedan ${n} días`; };
+  const daysLeftTxt = (now) => {
+    const n = dayDiff(now, cycleEnd(cycleOf(now)));
+    if (n === 0) return payday() === 1 ? 'último día del mes' : 'mañana cobras';
+    return n === 1 ? 'queda 1 día' : `quedan ${n} días`;
+  };
   const tabBtn = (t, cur) => `<button class="tab" data-act="tab" data-tab="${t.id}" ${t.id === cur ? 'aria-current="page"' : ''}>${I[t.i]}<span>${t.n}</span></button>`;
 
   // ─────────── HOY ───────────
@@ -471,7 +547,21 @@
         <div class="tile"><p class="tile-k">Quedan</p><p class="tile-v">${c.daysLeft} ${c.daysLeft === 1 ? 'día' : 'días'}</p><p class="tile-s">con hoy</p></div>
       </div>` : '';
 
-    return hero + ask + tiles + (ok ? monthCard(c) + marginCard(c) : '') + paymentsSec(c) + todaySec(c);
+    return hero + ask + payCard(c) + tiles + (ok ? monthCard(c) + marginCard(c) : '') + paymentsSec(c) + todaySec(c);
+  }
+
+  // En los últimos días del mes: si ya te han pagado, empieza el mes nuevo hoy
+  function payCard(c) {
+    if (c.when !== 'current' || c.level === 'empty' || DEMO) return '';
+    const next = addMonths(c.mk, 1);
+    if (S.app.cycleStarts && S.app.cycleStarts[next]) return '';
+    if (c.daysLeft > 5 || c.dayNum < 8) return '';
+    return `
+      <button class="ask ask--pay" data-act="paid-now">
+        <span class="ask-ico" aria-hidden="true">💶</span>
+        <span class="ask-txt"><b>¿Ya has cobrado?</b><small>Empieza ${monthName(next)} hoy en vez del ${dShort(cycleStart(next))}</small></span>
+        <span class="ask-go">${I.arrow}</span>
+      </button>`;
   }
 
   function monthCard(c) {
@@ -484,7 +574,7 @@
       const future = d > c.dayNum || d < c.effStart;
       const h = future ? 6 : Math.max(v > 0 ? 4 : 2, (v / ref) * 100);
       const k = future ? 'future' : d === c.dayNum ? 'today' : v === 0 ? 'zero' : v > c.planDaily ? 'over' : '';
-      return `<span class="bar ${k}" style="height:${future ? 4 : h}%" title="Día ${d}: ${money(v)}"></span>`;
+      return `<span class="bar ${k}" style="height:${future ? 4 : h}%" title="${dShort(addDays(c.start, i))}: ${money(v)}"></span>`;
     }).join('');
     const planTop = 100 - (c.planDaily / ref) * 100;
     const diff = c.projectedSaved - c.saveTarget;
@@ -504,7 +594,7 @@
             ${bars}
             ${c.planDaily > 0 ? `<div class="bars-plan" style="top:${clamp(planTop, 2, 100)}%"><span>plan ${money(c.planDaily)}</span></div>` : ''}
           </div>
-          <div class="bars-x"><span>1</span><span>${Math.round(c.days / 2)}</span><span>${c.days}</span></div>
+          <div class="bars-x"><span>${dShort(c.start)}</span><span>${dShort(addDays(c.start, Math.floor(c.days / 2)))}</span><span>${dShort(c.end)}</span></div>
         </div>
         ${projTxt}
       </section>`;
@@ -538,7 +628,7 @@
     const items = c.plannedItems.slice().sort((a, b) => {
       const pa = a.paid && a.paid[mk] ? 1 : 0, pb = b.paid && b.paid[mk] ? 1 : 0;
       if (pa !== pb) return pa - pb;
-      return (a.day || 99) - (b.day || 99);
+      return (dueDk(a, mk) || '9999').localeCompare(dueDk(b, mk) || '9999');
     });
     const unpaid = items.filter((p) => !(p.paid && p.paid[mk]));
     const show = unpaid.slice(0, 4);
@@ -555,20 +645,26 @@
 
   function plannedRow(p, mk) {
     const paid = !!(p.paid && p.paid[mk]);
-    const td = today().getDate();
-    const due = p.day ? (paid ? `día ${p.day}` : p.day < td ? `día ${p.day} · pendiente` : p.day === td ? 'vence hoy' : `día ${p.day}`) : (p.month ? 'solo este mes' : 'cada mes');
+    const tdk = todayDk();
+    const due = dueDk(p, mk);
+    let sub;
+    const unexp = isUnexpected(p, mk);
+    if (unexp) sub = 'imprevisto · ' + (p.month ? (p.date ? dShort(parseDk(p.date)) : 'este mes') : 'cada mes');
+    else if (due) { const dd = dShort(parseDk(due)); sub = paid ? dd : due < tdk ? `${dd} · pendiente` : due === tdk ? 'vence hoy' : dd; }
+    else sub = p.month ? 'solo este mes' : 'cada mes';
+    const late = !paid && due && due <= tdk;
     return `
-      <div class="row ${paid ? 'is-paid' : ''}" style="grid-template-columns:auto auto 1fr auto">
+      <div class="row ${paid && !unexp ? 'is-paid' : ''}" style="grid-template-columns:auto auto 1fr auto">
         <button class="check ${paid ? 'on' : ''}" data-act="toggle-paid" data-id="${p.id}" aria-pressed="${paid}" aria-label="${paid ? 'Marcar como no pagado' : 'Marcar como pagado'}: ${esc(p.name)}">${I.check}</button>
         <span class="row-ico" aria-hidden="true">${catOf(p.cat).e}</span>
-        <button class="row-main" style="text-align:left" data-act="edit-planned" data-id="${p.id}"><span class="row-t">${esc(p.name)}</span><span class="row-s ${!paid && p.day && p.day <= td ? 'warn' : ''}">${due}</span></button>
+        <button class="row-main" style="text-align:left" data-act="edit-planned" data-id="${p.id}"><span class="row-t">${esc(p.name)}</span><span class="row-s ${late ? 'warn' : ''}">${sub}</span></button>
         <span class="row-v">${money(amountIn(p, mk))}</span>
       </div>`;
   }
 
   function todaySec(c) {
     const dk = todayDk();
-    const list = M(c.mk).expenses.filter((e) => e.date === dk).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    const list = c.expenses.filter((e) => e.date === dk).sort((a, b) => (b.ts || 0) - (a.ts || 0));
     return `
       <section class="sec">
         <div class="sec-head"><h2>Hoy</h2>${list.length ? `<button class="link" data-act="tab" data-tab="gastos">Ver todo</button>` : ''}</div>
@@ -593,12 +689,14 @@
     const cm = curMk();
     const mk = ui.gm && ui.gm <= cm ? ui.gm : cm;
     const c = calc(mk);
-    const m = M(mk);
-    const prevOk = Object.keys(S.months).some((k) => k < mk) || (!!S.app.start && S.app.start < mk);
+    const sdk = dkOf(c.start);
+    const sc = startCycle();
+    const prevOk = (!!sc && sc < mk) || Object.values(S.months).some((m) => m.expenses.some((e) => e.date < sdk));
+    const unexp = c.plannedItems.filter((p) => isUnexpected(p, mk));
     const cats = Object.entries(c.byCat).sort((a, b) => b[1] - a[1]);
     const maxCat = cats.length ? cats[0][1] : 1;
     const groups = {};
-    for (const e of m.expenses) (groups[e.date] = groups[e.date] || []).push(e);
+    for (const e of c.expenses) (groups[e.date] = groups[e.date] || []).push(e);
     const dates = Object.keys(groups).sort().reverse();
     const avg = c.elapsed ? c.spent / c.elapsed : 0;
     const spentPct = c.B > 0 ? clamp((c.spent / c.B) * 100, 0, 100) : 100;
@@ -606,18 +704,18 @@
     return `
       <div class="month-nav">
         <button class="icon-btn" data-act="gm" data-d="-1" aria-label="Mes anterior" ${prevOk ? '' : 'disabled'}>${I.left}</button>
-        <h2>${monthLabel(mk)}</h2>
+        <div class="month-title"><h2>${monthLabel(mk)}</h2>${payday() !== 1 || cycleStart(mk).getDate() !== 1 ? `<p class="muted">${cycleRange(mk)}</p>` : ''}</div>
         <button class="icon-btn" data-act="gm" data-d="1" aria-label="Mes siguiente" ${mk < cm ? '' : 'disabled'}>${I.right}</button>
       </div>
       <section class="card">
         <div class="pace-head"><span>Gastado en el día a día</span><span class="num">${Math.round(c.B > 0 ? (c.spent / c.B) * 100 : 0)}%</span></div>
         <p class="hero-amount" style="font-size:40px;margin-top:6px">${moneyHTML(c.spent)}</p>
-        <p class="muted" style="font-weight:600;margin-top:2px">de ${money(c.B)} disponibles${c.extra ? ` (ya descontados ${money(c.extra)} apartados)` : ''}</p>
+        <p class="muted" style="font-weight:600;margin-top:2px">de ${money(c.B)} disponibles${c.extra ? ` (ya descontados ${money(c.extra)} apartados)` : ''}${c.unexpected ? ` (ya descontados ${money(c.unexpected)} de imprevistos)` : ''}</p>
         <div class="pace" style="margin-top:14px"><div class="pace-fill ${c.spent > c.B ? 'is-bad' : ''}" style="width:${spentPct}%"></div></div>
         <div class="tiles" style="margin-top:14px">
           <div class="tile" style="box-shadow:none;background:var(--surface-2)"><p class="tile-k">Media diaria</p><p class="tile-v">${money(avg)}</p></div>
           <div class="tile" style="box-shadow:none;background:var(--surface-2)"><p class="tile-k">Plan diario</p><p class="tile-v">${money(Math.max(0, c.planDaily))}</p></div>
-          <div class="tile" style="box-shadow:none;background:var(--surface-2)"><p class="tile-k">${c.when === 'past' ? 'Ahorraste' : 'Gastos'}</p><p class="tile-v ${c.when === 'past' && c.actualSaved < 0 ? 'bad' : ''}">${c.when === 'past' ? money(c.actualSaved) : m.expenses.length}</p></div>
+          <div class="tile" style="box-shadow:none;background:var(--surface-2)"><p class="tile-k">${c.when === 'past' ? 'Ahorraste' : 'Gastos'}</p><p class="tile-v ${c.when === 'past' && c.actualSaved < 0 ? 'bad' : ''}">${c.when === 'past' ? money(c.actualSaved) : c.expenses.length}</p></div>
         </div>
       </section>
       ${cats.length ? `
@@ -629,8 +727,14 @@
             <div class="catbar-track"><span style="width:${(v / maxCat) * 100}%"></span></div></div>`).join('')}
         </div></div>
       </section>` : ''}
+      ${unexp.length ? `
       <section class="sec">
-        <div class="sec-head"><h2>Movimientos</h2><span class="muted">${m.expenses.length} ${m.expenses.length === 1 ? 'gasto' : 'gastos'}</span></div>
+        <div class="sec-head"><h2>Imprevistos</h2><span class="muted num">${money(c.unexpected)}</span></div>
+        <div class="card card-tight"><div class="list">${unexp.map((p) => plannedRow(p, mk)).join('')}</div></div>
+        <p class="note" style="padding-inline:2px">Se reparten entre todos los días del mes en vez de comerse lo de un solo día.</p>
+      </section>` : ''}
+      <section class="sec">
+        <div class="sec-head"><h2>Movimientos</h2><span class="muted">${c.expenses.length} ${c.expenses.length === 1 ? 'gasto' : 'gastos'}</span></div>
         ${dates.length ? dates.map((dk) => {
           const list = groups[dk].sort((a, b) => (b.ts || 0) - (a.ts || 0));
           const d = parseDk(dk);
@@ -646,16 +750,22 @@
     const mk = curMk();
     const c = calc(mk);
     const inc = incomesFor(mk);
-    const pl = plannedFor(mk).slice().sort((a, b) => (a.day || 99) - (b.day || 99) || b.amount - a.amount);
+    const pl = plannedFor(mk).slice().sort((a, b) => (dueDk(a, mk) || '9999').localeCompare(dueDk(b, mk) || '9999') || b.amount - a.amount);
+    const P = payday();
     const tot = Math.max(c.income, c.planned + c.saveTarget, 1);
     const free = Math.max(0, c.baseB);
     const sv = S.app.saving;
     const missing = PRESETS.filter((p) => !pl.some((x) => x.name.toLowerCase() === p.n.toLowerCase())).slice(0, 8);
     return `
       <section class="card">
+        <button class="cycle-row" data-act="payday">
+          <span><span class="cycle-k">Tu mes</span><b>${cycleRange(mk)}</b></span>
+          <span class="cycle-r">${P === 1 ? 'Del 1 al último día' : `Cobras el día ${P}`}<span class="link">Cambiar</span></span>
+        </button>
         <div class="ledger">
           <div class="ledger-row"><span>Ingresos</span><span>${money(c.income)}</span></div>
-          <div class="ledger-row"><span><i class="sw c-planned"></i>Gastos previstos</span><span>−${money(c.planned)}</span></div>
+          <div class="ledger-row"><span><i class="sw c-planned"></i>Gastos fijos</span><span>−${money(c.planned - c.unexpected)}</span></div>
+          ${c.unexpected ? `<div class="ledger-row"><span><i class="sw c-planned" style="opacity:.55"></i>Imprevistos</span><span>−${money(c.unexpected)}</span></div>` : ''}
           <div class="ledger-row"><span><i class="sw c-save"></i>Ahorro${sv.mode === 'percent' ? ` (${sv.value}%)` : ''}</span><span>−${money(c.saveTarget)}</span></div>
         </div>
         <div class="split" role="img" aria-label="Reparto de tus ingresos">
@@ -667,7 +777,7 @@
         <div class="perday ${c.baseB <= 0 ? 'is-bad' : ''}">
           ${c.baseB > 0 ? `<span>Puedes gastar cada día</span><span class="big">${money(c.planDaily)}</span>` : `<span>${c.income > 0 ? 'Baja algún gasto o tu meta de ahorro: el plan no cuadra.' : 'Añade tus ingresos para empezar.'}</span>`}
         </div>
-        ${c.prior > 0 && c.baseB > 0 ? `<p class="note" style="margin-top:10px">Empezaste el día ${c.effStart}, así que este mes cuenta desde entonces: ${money(c.baseB - c.prior)} para ${c.days - c.effStart + 1} días. A partir de ${MONTHS[Number(addMonths(mk, 1).slice(5)) - 1]}, el mes completo.</p>` : ''}
+        ${c.prior > 0 && c.baseB > 0 ? `<p class="note" style="margin-top:10px">Empezaste el ${dShort(addDays(c.start, c.effStart - 1))}, así que este mes cuenta desde entonces: ${money(c.baseB - c.prior)} para ${c.days - c.effStart + 1} ${c.days - c.effStart + 1 === 1 ? 'día' : 'días'}. Desde el ${dShort(addDays(c.end, 1))}, el mes completo.</p>` : ''}
       </section>
 
       <section class="sec">
@@ -688,6 +798,7 @@
         <div class="card card-tight"><div class="list">
           ${pl.length ? pl.map((p) => plannedRow(p, mk)).join('') : `<p class="empty"><b>Apunta lo que ya sabes que vas a pagar</b>Alquiler, facturas, suscripciones… Así sabrás lo que te queda libre de verdad.</p>`}
           <button class="add-row" data-act="new-planned">${I.plus}Añadir gasto previsto</button>
+          <button class="add-row" style="margin-top:0" data-act="add-unexpected">${I.plus}Apuntar un imprevisto</button>
         </div></div>
         ${missing.length ? `<div class="chips">${missing.map((p) => `<button class="chip chip-add" data-act="new-planned" data-name="${esc(p.n)}" data-cat="${p.c}">${catOf(p.c).e} ${esc(p.n)}</button>`).join('')}</div>` : ''}
       </section>
@@ -798,7 +909,7 @@
   function renderSheet(first) {
     const s = $('#sheet-root');
     if (!ui.sheet) { s.innerHTML = ''; return; }
-    const builders = { expense: sheetExpense, income: sheetIncome, planned: sheetPlanned, saving: sheetSaving, goal: sheetGoal, deposit: sheetDeposit, extra: sheetExtra, settings: sheetSettings, confirm: sheetConfirm };
+    const builders = { payday: sheetPayday, expense: sheetExpense, income: sheetIncome, planned: sheetPlanned, saving: sheetSaving, goal: sheetGoal, deposit: sheetDeposit, extra: sheetExtra, settings: sheetSettings, confirm: sheetConfirm };
     const { title, body, sub } = builders[ui.sheet.type]();
     const scroll = $('.sheet', s) ? $('.sheet', s).scrollTop : 0;
     s.innerHTML = `
@@ -810,6 +921,10 @@
         <div class="sheet-body">${body}</div>
       </div>`;
     if (!first) $('.sheet', s).scrollTop = scroll;
+    $$('.chips:not(.wrap) .chip[aria-pressed="true"]', s).forEach((sel) => {
+      const row = sel.parentElement;
+      row.scrollLeft += sel.getBoundingClientRect().left - row.getBoundingClientRect().left - 20;
+    });
     if (first) {
       const f = $('[data-autofocus]', s);
       if (f && !matchMedia('(pointer: coarse)').matches) setTimeout(() => f.focus(), 60);
@@ -818,7 +933,7 @@
 
   // ─────────── gasto: añadir / comprobar / editar ───────────
   function newExpenseSheet(mode, extra = {}) {
-    openSheet(Object.assign({ type: 'expense', mode, kp: '', cat: S.app.lastCat || 'super', note: '', date: todayDk() }, extra));
+    openSheet(Object.assign({ type: 'expense', mode, kind: 'daily', kp: '', cat: S.app.lastCat || 'super', note: '', name: '', rec: false, date: todayDk() }, extra));
   }
   function kpValue() { const v = parseFloat(ui.sheet.kp || '0'); return isFinite(v) ? v : 0; }
   function kpHTML() {
@@ -839,13 +954,20 @@
     if (sh.mode === 'edit') return '';
     const x = kpValue();
     const c = calc(curMk());
-    if (sh.date !== todayDk()) return `<div class="verdict verdict--neutral" id="verdict"><span>Gasto de otro día: se descontará de lo que te queda para el resto del mes.</span></div>`;
-    const v = verdict(x, c);
-    if (!v) {
-      const t = sh.mode === 'check'
-        ? (c.level === 'empty' || c.level === 'broken' ? 'Completa tu plan para poder responderte.' : `Hoy te quedan <b>${money(Math.max(0, c.leftToday))}</b>. Escribe el precio y te digo si cabe.`)
-        : (c.level === 'empty' || c.level === 'broken' ? 'Escribe cuánto has gastado.' : `Hoy te quedan <b>${money(Math.max(0, c.leftToday))}</b>.`);
-      return `<div class="verdict verdict--neutral ${big ? 'big' : ''}" id="verdict"><span>${t}</span></div>`;
+    const noPlan = c.level === 'empty' || c.level === 'broken';
+    let v;
+    if (sh.kind === 'unexpected') {
+      v = verdictUnexpected(x, c, sh.rec);
+      if (!v) return `<div class="verdict verdict--neutral" id="verdict"><span>${noPlan ? 'Escribe cuánto te han cobrado.' : `Escribe cuánto te han cobrado. No se come solo lo de hoy: se reparte entre ${c.daysLeft === 1 ? 'hoy' : `los ${c.daysLeft} días que quedan`}.`}</span></div>`;
+    } else {
+      if (sh.date !== todayDk()) return `<div class="verdict verdict--neutral" id="verdict"><span>Gasto de otro día: se descontará de lo que te queda para el resto del mes.</span></div>`;
+      v = verdict(x, c);
+      if (!v) {
+        const t = sh.mode === 'check'
+          ? (noPlan ? 'Completa tu plan para poder responderte.' : `Hoy te quedan <b>${money(Math.max(0, c.leftToday))}</b>. Escribe el precio y te digo si cabe.`)
+          : (noPlan ? 'Escribe cuánto has gastado.' : `Hoy te quedan <b>${money(Math.max(0, c.leftToday))}</b>.`);
+        return `<div class="verdict verdict--neutral ${big ? 'big' : ''}" id="verdict"><span>${t}</span></div>`;
+      }
     }
     const ico = v.lvl === 'good' ? I.check : v.lvl === 'neutral' ? '?' : I.bang;
     return `<div class="verdict verdict--${v.lvl} ${big ? 'big' : ''}" id="verdict" aria-live="polite"><span class="verdict-ico">${ico}</span><span><span class="verdict-h">${v.h}</span>${v.t}</span></div>`;
@@ -854,21 +976,23 @@
     const sh = ui.sheet;
     const yest = dkOf(new Date(today().getFullYear(), today().getMonth(), today().getDate() - 1));
     const isOther = sh.date !== todayDk() && sh.date !== yest;
-    const title = sh.mode === 'check' ? '¿Me lo puedo permitir?' : sh.mode === 'edit' ? 'Editar gasto' : 'Nuevo gasto';
+    const unexp = sh.mode === 'add' && sh.kind === 'unexpected';
+    const title = sh.mode === 'check' ? '¿Me lo puedo permitir?' : sh.mode === 'edit' ? 'Editar gasto' : unexp ? 'Gasto imprevisto' : 'Nuevo gasto';
     const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'dec', '0', 'del'];
     const buttons = sh.mode === 'check'
       ? `<div class="btn-row"><button class="btn btn-soft" data-act="resist">Mejor no</button><button class="btn btn-primary" data-act="save-exp">Lo compro</button></div>`
       : sh.mode === 'edit'
         ? `<div class="btn-row wide-r"><button class="btn btn-danger" data-act="del-exp">Borrar</button><button class="btn btn-primary" data-act="save-exp">Guardar</button></div>`
-        : `<button class="btn btn-primary btn-block" data-act="save-exp">Añadir gasto</button>`;
-    return {
-      title,
-      body: `
-        <p class="amount ${sh.kp ? '' : 'empty-amt'}" id="kp-display" aria-live="polite">${kpHTML()}</p>
-        ${sh.mode === 'edit' ? '' : verdictHTML(sh.mode === 'check')}
-        <div class="chips" role="group" aria-label="Categoría">
-          ${CATS.map((c) => `<button class="chip" data-act="cat" data-cat="${c.id}" aria-pressed="${sh.cat === c.id}">${c.e} ${c.n}</button>`).join('')}
-        </div>
+        : `<button class="btn btn-primary btn-block" data-act="save-exp">${unexp ? 'Apuntar imprevisto' : 'Añadir gasto'}</button>`;
+    const kindSeg = sh.mode === 'add' ? `
+        <div class="seg" role="group" aria-label="Tipo de gasto">
+          <button data-act="kind" data-kind="daily" aria-pressed="${!unexp}">Del día a día</button>
+          <button data-act="kind" data-kind="unexpected" aria-pressed="${unexp}">Imprevisto</button>
+        </div>` : '';
+    const details = unexp ? `
+        <input class="input" id="exp-name" placeholder="¿Qué es? Ej. suscripción, multa, factura…" maxlength="40" value="${esc(sh.name)}" autocomplete="off">
+        <div class="toggle-row"><span>Se cobrará cada mes<small>Ej. una suscripción nueva: pasa a tus gastos fijos</small></span>
+          <label class="switch"><input type="checkbox" id="exp-rec" ${sh.rec ? 'checked' : ''} aria-label="Se cobrará cada mes"><span></span></label></div>` : `
         <div class="grid2">
           <input class="input" id="exp-note" placeholder="Nota (opcional)" maxlength="60" value="${esc(sh.note)}" autocomplete="off">
           <div class="seg" role="group" aria-label="Fecha">
@@ -877,7 +1001,16 @@
           </div>
         </div>
         <label class="field" ${isOther ? '' : 'style="display:none"'} id="date-field"><span>Fecha</span><input class="input" type="date" id="exp-date" value="${sh.date}" max="${todayDk()}"></label>
-        ${!isOther ? `<button class="link" style="align-self:flex-start;margin-top:-8px" data-act="other-date">Otra fecha…</button>` : ''}
+        ${!isOther ? `<button class="link" style="align-self:flex-start;margin-top:-8px" data-act="other-date">Otra fecha…</button>` : ''}`;
+    return {
+      title,
+      body: `${kindSeg}
+        <p class="amount ${sh.kp ? '' : 'empty-amt'}" id="kp-display" aria-live="polite">${kpHTML()}</p>
+        ${sh.mode === 'edit' ? '' : verdictHTML(sh.mode === 'check')}
+        <div class="chips" role="group" aria-label="Categoría">
+          ${CATS.map((c) => `<button class="chip" data-act="cat" data-cat="${c.id}" aria-pressed="${sh.cat === c.id}">${c.e} ${c.n}</button>`).join('')}
+        </div>
+        ${details}
         <div class="keypad" role="group" aria-label="Teclado numérico">
           ${keys.map((k) => k === 'dec' ? `<button class="key" data-act="key" data-k="." ${zeroDec() ? 'disabled' : ''} aria-label="Decimales">${esc(decSep())}</button>`
             : k === 'del' ? `<button class="key" data-act="key" data-k="del" aria-label="Borrar">${I.back}</button>`
@@ -908,6 +1041,8 @@
     const sh = ui.sheet;
     if (!sh || sh.type !== 'expense') return;
     const n = $('#exp-note'); if (n) sh.note = n.value.trim();
+    const nm = $('#exp-name'); if (nm) sh.name = nm.value.trim();
+    const rc = $('#exp-rec'); if (rc) sh.rec = rc.checked;
     const d = $('#exp-date'); if (d && d.value && d.closest('.field').style.display !== 'none') sh.date = d.value;
   }
   function saveExpense() {
@@ -915,6 +1050,7 @@
     const sh = ui.sheet;
     const amount = r2(kpValue());
     if (!(amount > 0)) { const d = $('#kp-display'); d.classList.remove('shake'); void d.offsetWidth; d.classList.add('shake'); return; }
+    if (sh.mode === 'add' && sh.kind === 'unexpected') { saveUnexpected(amount); return; }
     let date = sh.date;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) date = todayDk();
     if (date > todayDk()) date = todayDk();
@@ -941,6 +1077,21 @@
       ? (c.leftToday >= 0 ? `Apuntado. Te quedan ${money(c.leftToday)} hoy` : `Apuntado. Hoy vas ${money(-c.leftToday)} por encima`)
       : 'Gasto apuntado';
     toast(msg, () => { const mm = Mw(mk); mm.expenses = mm.expenses.filter((x) => x.id !== e.id); Store.saveMonth(mk); render(); });
+  }
+  function saveUnexpected(amount) {
+    const sh = ui.sheet;
+    const k = curMk();
+    const item = {
+      id: uid(), name: sh.name || catOf(sh.cat).n, amount, cat: sh.cat, day: today().getDate(),
+      month: sh.rec ? null : k, from: k, paid: { [k]: true }, unexpected: true, date: todayDk(),
+    };
+    S.app.planned.push(item);
+    Store.saveApp();
+    closeSheet(); render();
+    const c = calc(k);
+    const msg = c.level === 'empty' || c.level === 'broken' ? 'Imprevisto apuntado'
+      : c.leftToday >= 0 ? `Imprevisto apuntado. Hoy puedes gastar ${money(c.leftToday)}` : 'Imprevisto apuntado. Hoy ya no te queda margen';
+    toast(msg, () => { S.app.planned = S.app.planned.filter((p) => p.id !== item.id); Store.saveApp(); render(); });
   }
   function findExpense(id) {
     for (const [mk, m] of Object.entries(S.months)) {
@@ -1089,6 +1240,38 @@
     return `Ahorrarás <b>${money(c.planSaved + x)}</b> este mes y podrás gastar <b>${money(nd)}</b> al día durante ${dl}.`;
   }
 
+  // ─────────── día de cobro ───────────
+  function withPayday(P, fn) {
+    const prev = S.app.payday, prevOv = S.app.cycleStarts;
+    S.app.payday = P; S.app.cycleStarts = {};
+    try { return fn(); } finally { S.app.payday = prev; S.app.cycleStarts = prevOv; }
+  }
+  const PAYDAYS = [1, 25, 26, 27, 28, 30];
+  function paydayExample(P) {
+    return withPayday(P, () => {
+      if (P === 1) return 'Tu mes irá del día 1 al último día de cada mes.';
+      const next = addMonths(cycleOf(today()), 1);
+      return `Tu mes irá de cobro a cobro. Por ejemplo, ${monthName(next)} irá del <b>${dShort(cycleStart(next))}</b> al <b>${dShort(cycleEnd(next))}</b>.`;
+    });
+  }
+  function sheetPayday() {
+    const sh = ui.sheet;
+    if (sh.p == null) sh.p = payday();
+    const P = sh.p;
+    return {
+      title: '¿Qué día cobras?',
+      sub: 'Tu mes empieza el día que cobras, así lo que puedes gastar cuadra con el dinero que tienes de verdad.',
+      body: `
+        <div class="chips wrap" role="group" aria-label="Día de cobro">
+          ${PAYDAYS.map((d) => `<button class="chip" data-act="pd-pick" data-v="${d}" aria-pressed="${P === d}">${d === 1 ? 'Día 1 (mes natural)' : `Día ${d}`}</button>`).join('')}
+          <input class="input chip-input" id="pd-other" inputmode="numeric" maxlength="2" placeholder="Otro" value="${PAYDAYS.includes(P) ? '' : P}" aria-label="Otro día de cobro">
+        </div>
+        <div class="preview-line" id="pd-preview">${paydayExample(P)}</div>
+        <p class="note">Si un mes te pagan antes, en los últimos días te aparecerá “¿Ya has cobrado?” para empezar el mes nuevo ese mismo día.</p>
+        <button class="btn btn-primary btn-block" data-act="pd-save">Guardar</button>`,
+    };
+  }
+
   // ─────────── ajustes ───────────
   function sheetSettings() {
     const cloud = Store.mode === 'cloud';
@@ -1103,6 +1286,7 @@
           <div class="field"><span class="field-label">Moneda</span>
             <div class="chips wrap">${CURRENCIES.map((c) => `<button class="chip" data-act="s-cur" data-c="${c.c}" aria-pressed="${S.app.currency === c.c}">${esc(c.s)} ${esc(c.n)}</button>`).join('')}</div></div>
           <button class="btn btn-primary btn-block" data-act="s-save">Guardar</button>
+          <button class="btn btn-soft btn-block" data-act="payday">Día de cobro: ${payday() === 1 ? 'día 1 (mes natural)' : `día ${payday()}`}</button>
         </div>
         <div class="settings-group">
           <h3>Tus datos</h3>
@@ -1132,7 +1316,7 @@
     return {
       title: sh.title,
       body: `<p style="font-size:15px;line-height:1.5">${sh.text}</p>
-        <div class="btn-row"><button class="btn btn-soft" data-act="close">Cancelar</button><button class="btn btn-danger" data-act="confirm-ok">${sh.ok}</button></div>`,
+        <div class="btn-row"><button class="btn btn-soft" data-act="close">Cancelar</button><button class="btn ${sh.okClass || 'btn-danger'}" data-act="confirm-ok">${sh.ok}</button></div>`,
     };
   }
 
@@ -1141,6 +1325,7 @@
     ui.ob = {
       step: 0, name: '', currency: S.app.currency || 'EUR',
       incomes: [{ id: uid(), name: 'Nómina', amount: '' }],
+      payday: 1,
       planned: [],
       saving: { mode: 'percent', value: 20 },
     };
@@ -1151,17 +1336,22 @@
     const planned = sum(o.planned, (p) => parseNum(p.amount));
     const target = o.saving.mode === 'percent' ? (income * o.saving.value) / 100 : parseNum(o.saving.value);
     const free = income - planned - target;
-    return { income, planned, target, free, per: free / daysIn(curMk()) };
+    const k = curMk();
+    const days = dayDiff(cycleStart(k), cycleEnd(k)) + 1;
+    return { income, planned, target, free, per: free / days, k, days };
   }
   function renderOnboarding() {
     if (!ui.ob) obInit();
     const o = ui.ob;
     const prev = S.app.currency;
     S.app.currency = o.currency; // para formatear con la moneda elegida
+    S.app.payday = o.payday;
     if (prev !== o.currency) fmtCache.clear();
     const steps = [obWelcome, obIncome, obPlanned, obSaving, obResult];
     const html = steps[o.step]();
-    return `<div class="ob">${html}</div>`;
+    const anim = ui.animKey !== 'ob:' + o.step;
+    ui.animKey = 'ob:' + o.step;
+    return `<div class="ob ${anim ? 'enter' : ''}">${html}</div>`;
   }
   const obProgress = (n, label) => `
     <div style="display:flex;flex-direction:column;gap:10px">
@@ -1208,6 +1398,13 @@
       <div class="ob-rows">${obRows(o.incomes, 'incomes', false)}</div>
       <button class="link" style="align-self:flex-start" data-act="ob-add" data-kind="incomes">+ Otro ingreso</button>
       <div class="ob-total"><span>Total al mes</span><b id="ob-total">${money(obCalc().income)}</b></div>
+      <div class="field"><span class="field-label">¿Qué día cobras normalmente?</span>
+        <div class="chips wrap" role="group" aria-label="Día de cobro">
+          ${PAYDAYS.map((d) => `<button class="chip" data-act="ob-pay" data-v="${d}" aria-pressed="${o.payday === d}">${d === 1 ? 'Día 1 (mes natural)' : `Día ${d}`}</button>`).join('')}
+          <input class="input chip-input" id="ob-pay-other" inputmode="numeric" maxlength="2" placeholder="Otro" value="${PAYDAYS.includes(o.payday) ? '' : o.payday}" aria-label="Otro día de cobro">
+        </div>
+        <p class="note" id="ob-pay-note">${paydayExample(o.payday)}</p>
+      </div>
       <div class="ob-foot"><button class="btn btn-primary btn-block" data-act="ob-next">Siguiente</button><button class="btn btn-soft btn-block" data-act="ob-back">Atrás</button></div>`;
   }
   function obPlanned() {
@@ -1243,7 +1440,10 @@
   function obResult() {
     const c = obCalc();
     const ok = c.free > 0;
-    const days = daysIn(curMk());
+    const k = c.k;
+    const end = cycleEnd(k);
+    const left = dayDiff(today(), end) + 1;
+    const fromToday = dayDiff(cycleStart(k), today()) > 0;
     return `
       ${obProgress(4, 'Tu plan')}
       <div class="ob-result ${ok ? '' : 'is-bad'}">
@@ -1258,9 +1458,9 @@
           <div class="ledger-row"><span>Ahorro</span><span>−${money(c.target)}</span></div>
         </div>
         <div class="ledger-total"><b>Para el día a día</b><span class="big">${money(c.free)}</span></div>
-        <p class="note" style="margin-top:10px">${ok ? (today().getDate() > 1
-          ? `Como empiezas hoy, ${monthName(curMk())} cuenta desde el día ${today().getDate()}: ${money(c.per * (days - today().getDate() + 1))} para los ${days - today().getDate() + 1} días que quedan. Si un día gastas menos, los demás tendrás un poco más (y al revés).`
-          : `${money(c.free)} entre los ${days} días de ${monthName(curMk())}. Si un día gastas menos, los demás tendrás un poco más (y al revés).`) : ''}</p>
+        <p class="note" style="margin-top:10px">${ok ? (fromToday
+          ? `Como empiezas hoy, este mes cuenta desde hoy: ${money(c.per * left)} para ${left === 1 ? 'hoy' : `los ${left} días que quedan`}. El ${dShort(addDays(end, 1))} empieza ${monthName(addMonths(k, 1))} completo. Si un día gastas menos, los demás tendrás un poco más (y al revés).`
+          : `${money(c.free)} entre los ${c.days} días de ${monthName(k)} (${cycleRange(k)}). Si un día gastas menos, los demás tendrás un poco más (y al revés).`) : ''}</p>
       </div>
       <div class="ob-foot"><button class="btn btn-primary btn-block" data-act="ob-finish" ${c.income > 0 ? '' : 'disabled'}>Empezar</button><button class="btn btn-soft btn-block" data-act="ob-back">Atrás</button></div>`;
   }
@@ -1268,7 +1468,7 @@
     const o = ui.ob;
     const mk = curMk();
     S.app = normalizeApp({
-      onboarded: true, name: o.name.trim(), currency: o.currency, start: mk, startDay: today().getDate(),
+      onboarded: true, name: o.name.trim(), currency: o.currency, start: mk, startDate: todayDk(), payday: o.payday,
       incomes: o.incomes.filter((i) => parseNum(i.amount) > 0).map((i) => ({ id: uid(), name: i.name.trim() || 'Ingreso', amount: r2(parseNum(i.amount)), month: null, from: mk })),
       planned: o.planned.filter((p) => parseNum(p.amount) > 0).map((p) => ({ id: uid(), name: p.name.trim() || 'Gasto', amount: r2(parseNum(p.amount)), cat: p.cat || 'otros', day: null, month: null, from: mk, paid: {} })),
       saving: o.saving.mode === 'percent' ? { mode: 'percent', value: o.saving.value } : { mode: 'amount', value: r2(parseNum(o.saving.value)) },
@@ -1294,7 +1494,7 @@
     let seed = 7;
     const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
     const a = normalizeApp({
-      onboarded: true, name: 'Alex', currency: cur, start: addMonths(mk, -4), startDay: 1,
+      onboarded: true, name: 'Alex', currency: cur, start: addMonths(mk, -4), startDate: addMonths(mk, -4) + '-01', payday: 1,
       incomes: [{ id: 'i1', name: 'Nómina', amount: 1850 * k, month: null }],
       planned: [
         ['Alquiler', 650, 1, 'hogar'], ['Abono transporte', 40, 1, 'transporte'], ['Gimnasio', 34.9, 5, 'salud'], ['Luz', 58, 8, 'facturas'],
@@ -1598,6 +1798,50 @@
     'ob-pct'(el) { ui.ob.saving = { mode: 'percent', value: Number(el.dataset.v) }; render(); },
     'ob-fixed'() { const c = obCalc(); ui.ob.saving = { mode: 'amount', value: c.target ? String(r2(c.target)).replace('.', decSep()) : '' }; render(); const f = $('[data-focus]'); f && f.focus(); },
     'ob-finish'() { obFinish(); },
+    'ob-pay'(el) { ui.ob.payday = Number(el.dataset.v); render(); },
+    payday() { openSheet({ type: 'payday' }); },
+    'pd-pick'(el) { ui.sheet.p = Number(el.dataset.v); renderSheet(); },
+    'pd-save'() {
+      const P = clamp(parseInt(ui.sheet.p, 10) || 1, 1, 31);
+      S.app.payday = P;
+      // los inicios adelantados de meses que aún no han empezado dejan de valer
+      const cur = curMk();
+      for (const k of Object.keys(S.app.cycleStarts)) if (k > cur) delete S.app.cycleStarts[k];
+      Store.saveApp(); ensureSummaries(); closeSheet(); render();
+      const c = calc(curMk());
+      const nx = addMonths(c.mk, 1);
+      toast(c.daysLeft <= 1 ? `Listo: mañana empieza ${monthName(nx)} (${cycleRange(nx)})` : `Listo: este mes va del ${cycleRange(c.mk)}`);
+    },
+    'add-unexpected'() { newExpenseSheet('add', { kind: 'unexpected', cat: 'subs' }); },
+    kind(el) {
+      syncExpenseInputs();
+      const sh = ui.sheet;
+      const k = el.dataset.kind;
+      if (k === sh.kind) return;
+      sh.kind = k;
+      sh.cat = k === 'unexpected' ? 'subs' : S.app.lastCat || 'super';
+      renderSheet();
+    },
+    'paid-now'() {
+      const cur = curMk();
+      const next = addMonths(cur, 1);
+      const was = cycleStart(next);
+      openSheet({
+        type: 'confirm', title: `¿Empezar ${monthName(next)} hoy?`, ok: 'Sí, ya he cobrado', okClass: 'btn-primary',
+        text: `Tu mes nuevo empezará hoy, ${dShort(today())}, en vez del ${dShort(was)}. Lo que no hayas gastado de ${monthName(cur)} se queda como ahorro.`,
+        onOk: () => {
+          S.app.cycleStarts = Object.assign({}, S.app.cycleStarts, { [next]: todayDk() });
+          Store.saveApp(); ensureSummaries();
+          closeSheet(); ui.tab = 'hoy'; render(); scrollTo(0, 0);
+          const c = calc(curMk());
+          toast(`¡Empieza ${monthName(next)}! Hoy puedes gastar ${money(Math.max(0, c.leftToday))}`, () => {
+            delete S.app.cycleStarts[next]; Store.saveApp();
+            const m = S.months[cur]; if (m && m.summary) { m.summary = null; Store.saveMonth(cur); }
+            render();
+          });
+        },
+      });
+    },
   };
   function focusFirst() {
     if (matchMedia('(pointer: coarse)').matches) return;
@@ -1623,6 +1867,16 @@
   });
   document.addEventListener('input', (e) => {
     const t = e.target;
+    if (t.id === 'ob-pay-other' || t.id === 'pd-other') {
+      const v = parseInt(t.value, 10);
+      const P = v >= 1 && v <= 31 ? v : 1;
+      if (t.id === 'ob-pay-other') { ui.ob.payday = P; S.app.payday = P; }
+      else ui.sheet.p = P;
+      $$(`.chip[data-act="${t.id === 'ob-pay-other' ? 'ob-pay' : 'pd-pick'}"]`).forEach((c) => c.setAttribute('aria-pressed', Number(c.dataset.v) === P && t.value === ''));
+      const note = $(t.id === 'ob-pay-other' ? '#ob-pay-note' : '#pd-preview');
+      if (note) note.innerHTML = paydayExample(P);
+      return;
+    }
     if (t.dataset.ob) {
       const path = t.dataset.ob.split('.');
       let o = ui.ob;
@@ -1650,6 +1904,7 @@
   });
   document.addEventListener('change', (e) => {
     if (e.target.id === 'import-file' && e.target.files && e.target.files[0]) importData(e.target.files[0]);
+    if (e.target.id === 'exp-rec' && ui.sheet) { ui.sheet.rec = e.target.checked; const v = $('#verdict'); if (v) v.outerHTML = verdictHTML(false); }
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && ui.sheet) { closeSheet(); return; }
