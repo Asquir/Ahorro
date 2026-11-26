@@ -1,5 +1,5 @@
 /* Service worker de Ahorro: guarda la app para que abra al instante y sin conexión. */
-const VERSION = 'ahorro-v2';
+const VERSION = 'ahorro-v3';
 const SHELL = [
   './',
   './index.html',
